@@ -1,0 +1,21 @@
+source {DPLAYER-P-PCK-4_4.4.ipc}
+# set curdir [pwd]
+
+set script_path [ file dirname [ file normalise [info script ] ] ]
+# set filename "$script_path/data/component_connections.csv"
+
+set f [open $filename]
+
+while {[gets $f line] >=0} {
+    set fields [split $line ","]
+    set comp_from [lindex $fields 0]
+    set comp_to [lindex $fields 1]
+    set conn_type [lindex $fields 2]
+
+    puts " creating connection from $comp_from to $comp_to of type $conn_type"
+    puts [ setconn $comp_from $comp_to $conn_type]
+    busy 500
+}
+
+set env(create_connections_input_file) ""
+close $f

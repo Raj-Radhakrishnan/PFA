@@ -1,0 +1,15 @@
+source {DPLAYER-P-PCK-4_4.4.ipc}
+
+proc lstnhand {Action OwnerName ObjName ObjType } {
+
+    puts "Action is $Action"
+    puts "OwnerName is $OwnerName"
+    puts "ObjName is $ObjName"
+    puts "ObjType is $ObjType"
+
+}
+
+while {[registered]} {
+
+    listen lstnhand
+}

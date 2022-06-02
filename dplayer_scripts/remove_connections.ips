@@ -1,0 +1,21 @@
+source {DPLAYER-P-PCK-4_4.4.ipc}
+
+set filename $::env(remove_connections_input_file)
+
+set f [open $filename]
+
+while {[gets $f line]>=0} {
+    set fields [split $line ","]
+    set comp_from [lindex $fields 0]
+    set comp_to [lindex $fields 1]
+    set conn_type [lindex $fields 2]
+
+    puts "remnoving connection from $comp_from to $comp_to of type $conn_type"
+
+    puts [ remconn $comp_from $comp_to ]
+    busy 500
+
+}
+
+set env(remove_connections_input_file) ""
+close $f

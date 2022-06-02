@@ -1,0 +1,18 @@
+source {DPLAYER-P-PCK-4_4.4.ipc}
+
+set filename $::env(stop_components_input_file)
+# input file format is as follow:
+#  <component name>
+
+set f [open $filename]
+while {[gets $f line]>=0} {
+    set fields [split $line ","]
+    set componentname [lindex $fiels 0]
+
+    puts "stop $componentname"
+
+    puts [ stop $componentname ]
+}
+
+set env(stop_components_input_file) ""
+close $f
