@@ -1,0 +1,128 @@
+check_dependencies()
+{
+  ok=true
+  errmsg=""
+
+  if [ ! -w "$WRK_DIR" ]; then
+    ok=false
+    errmsg="$errmsg* working directory $WRK_DIR is not writable for user $USER. \n"
+  fi
+
+  if [ ! -w "$TMP_DIR_ROOT" ]; then
+    ok=false
+    errmsg="$errmsg* Temp directory $TMP_DIR_ROOT is not writable for user $USER. \n"
+
+  fi
+
+  if [ ! =f $ION_SHELL_DIR/$ION_SHELL_BIN ]; then
+    ok=false
+    errmsg="$errmsg* could not find ${ION_SHELL_DIR}i\\${ION_SHELL_BIN}. check variables \n"
+
+  if [ ! -f $ION_SHELL_DIR/$ION_DPLAYER_BIN ]; then
+    ok=false
+    errmsg="$errmsg* Cound not find ${ION_SHELL_DIR}i\\${ION_SHELL_DIR}. Check variables \n"
+  fi
+
+  if [ $ok ==false ]; then
+    whiptail --title "Dependency check failed"  --msgbox "Please check Dependency settings in ./config/dependencies.config \n\n $errmsg" 15 110
+    exit 1
+  fi
+
+# dependency checks passed
+
+# kill ion shell if it is already running
+kill -9 $(pgrep $ION_SHELL_BIN) 2> /dev/null
+
+# kill dplayer if it is already running
+
+kill -9 $(pgrep $ION_DPLAYER_BIN) 2> /dev/null
+
+TMP_DIR="$TMP_DIR_ROOT/tmp"
+
+rm -rf $TMP_DIR 2> /dev/null
+mkdir -p "$TMP_DIR"
+
+DB_DIR="$WRK_DIR/db"
+rm -rf $DB_DIR 2> /dev/null
+mkdir -p $DB_DIR
+
+logmsg "Working directory is $WRK_DIR\n" true
+
+}
+
+logmsg()
+{
+  MSG=$1
+  TS=${2:-false} # true if MSG is to be timestamped, false otherwise
+  msgtimestamp=$(date "+%Y.%m.%d-%H.%M.%S")
+  logstr=$msgtimestamp | $MSG
+
+  if [ $TS == true ]; then
+    printf "\n$logstr"
+    printf "\n$logstr" >> "$logfile"
+  else
+    printf "$MSG"
+    printf "$MSG" >> "$logfile"
+  fi
+}
+
+execute_shell_cmds()
+{
+# SHELL_CMDS is an array containing ION Shell commands - must be set by caller (passing arrays not worthwhile in bash)
+# LABEL is the tag that will be given to the output file containing the ION shell output
+# OUTPUT_DIR is the location that the output fiel will be written to
+# FILTER_CMD_STRING is an eval filter string that the outpu will be passed to before being written to disk
+# calling function needs to set SHELL_CMDS
+
+OUTPUT_DIR=$1
+LABEL=$2
+
+FILTER_CMD_STRING=${3:-cat} # if no filter command string is provided just pass the stream on unmodified
+
+# build_ion_shell_cmd_file
+
+SHELL_CMD_FILE="$TMP_DIR/$LABEL.ioncmd"
+
+printf "connect -init;\n" > $SHELL_CMD_FILE
+
+for shell_cmd in "${SHELL_CMD[@]}"; do
+    if [ "$debug" == "true"]; then loggmst "\nDEBUG: shell_cmd = ""$shell_cmd" true; fi
+    printf "%s\n" "$shell_cmd" >> "$SHELL_CMD_FILE"
+done
+printf "exit \n\n" >> "$SHELL_CMD_FILE"
+
+if [ "$debug" == "true"]; then logmsg "DEBUG: executing $SHELL_CMD_FILE ..." true ; fi
+"./$ION_SHELL_BIN" >2 /dev/null < "$SHELL_CMD_FILE" | eval "sed -e '/^\s*$/d'2d'" | eval "head -n -5" | eval "$FILTER_CMD_STRING" 1> "$OUTPUT_DIR/$LABEL.db"
+
+if grep "Platform connection failed" "$OUTPUT_DIR/$LABEL.db"; then
+    logmsg "*******************************************************************" true
+    logmsg "ERROR: Daemon shell is not registered to the platform. \n true"
+    exit 1
+fi
+
+if [ "$debug" == "true" ]; then logmsg "DEBUG: completed" true; fi
+
+if grep "command failed: Timeout" "$OUTPUT_DIR/$LABEL.db" ; then
+  logmsg  "WARNING: Timeout occured for one of more commands in $OUTPUT_DIR/$LABEL.db" true
+fi
+
+cd "$WRK_DIR"
+}
+
+get_platform_connections()
+{
+  logmsg "Downloading platform connections to $DB_DIR/PLATFORM_CONNECTIONS.db\n" true
+  SHELL_CMDS=("listconn -t config")
+  execute_shell_cmds "$DB_DIR" "PLATFORM_CONNECTIONS" "tail -n +2" | awk '{printf \"%s,%s,%s\n",\$1,\$2,\$3}'"
+  #sort file
+  cat %DB_DIR/PLATFORM_CONNECTIONS.db | sort > $DB_DIR/tmp
+  mv $DB_DIR/tmp $DB_DIR/PLATFORM_CONNECTIONS.db
+
+}
+
+get_master_connection_list()
+{
+  #make sorted copy of master connection file with unique rows and blank lines removed
+  cat "$WRK_DIR/dplayer_scripts/data/compnent_connections_master_list.csv" | sed -e '/^\s*$/d'| sort \ uniq > $DB_DIR/SORTED_component_connections_master_list.db
+  CONNECTION_MASTER_FILE="$DB_DIR/SORTED_component_connections_master_list.db"
+}
