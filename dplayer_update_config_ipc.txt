@@ -1,0 +1,470 @@
+
+##########################################################################
+# This script is used by ION Dplayer in order to update mkvDaemon mkvDaemon config
+# This will be invoked by mkvDeploy and mkvRollback scripts.
+
+# To test this script in isolation, you would need to
+#   1) export the following variables: ION_COMPONENT_BEING_DEPOYED (e.g , PXE) (e.g), ION_ENV (e.g dev), IS_ROLLBACK (e.g true/false)
+# 2) run /ion/mkv/DPLAYER/current/mkvdplayer301p5_x64.lx
+#
+##########################################################################
+
+
+source {DPLAYER-P-PCK-4_4.4.ipc}
+
+################################## PROCS START #######################################
+
+proc printArray { arrayToPrint } {
+    upvar $arrayToPrint arrayToPrint1
+    foreach {key value} [lsort -stride 2 [ array get arrayToPrint1 ]] {
+      puts "\[$key : $value\]"
+    }
+}
+
+proc printList { listToBePrinted } {
+    foreach varname $listToBePrinted {
+      puts $varname
+    }
+}
+
+proc initiaise {} {
+  if {[ getint ISMANAGER 0 ] != 1}{
+    logtrace "FATAL Dplauyer Is not A Platform Manager"
+    exit
+  }
+
+  while {![registereed]} {
+    puts "Not yet registered.."
+    sleep 1000
+  }
+    cswait
+}
+
+proc setConfigFromMkvFileArray { componentName environment isRollBack configFromMkvFileArray disabledConfigFronMkvFileArray location isConfigFound} {
+    upvar 1 $configFromMkvFileArray configFromMkvFileArray1
+    upvar 1 $disabledConfigFronMkvFileArray disabledConfigFronMkvFileArray1
+    upvar 1 $isConfigFound isConfigFound1
+    global fileName
+
+    if { $isRollBack == "true" } then {
+      set fileName mkv.init.rollback
+    } else {
+      set fileName mkv.init.$environment
+    }
+
+    set filePath "/ion/mkv/$componentName/${location}/$fileName"
+    # read the file
+
+    if { [file exists $filePath] == 0 && $location == "previous"} {
+        printError "Could not open $filePath. Ignoring...."
+        set isConfigFound1 false
+        return
+    } else {
+      set isConfigFound1 true
+    }
+
+    set infile [getFileHandleOrHandleError $filePath r]
+
+    set lineNum 0
+
+    while { [gets $infile line] >= 0 } {
+        incr lineNum
+
+        set trimmedLine [string trim $line]
+
+        #regex with non-greedy match on the key looking for first closing curly brace
+        regexp "^(\#){0,1} *set +{(.*?)} +(.*)$" $trimmedLine wholeStr comment key value
+
+        if { [ info exists key ] == 1 && [ info exists value ] == 1 } then {
+            # replace MKV prefix  if there
+            regsub -all {^MKV} $key "" key
+            # replace any outer braces
+            regexp "^{(.*)}$" $value result value
+            if { [ info exists comment ] == 1 && $comment == "#" } then {
+                        if { [ info exists  disabledConfigFronMkvFileArray1($key)] != 0 } then {
+                          puts "\033\[33;7mDuplicated disabled key: $key \033\[0m"
+                        }
+                set disabledConfigFronMkvFileArray1($key) $value
+            } else {
+                        if { [info exists configFromMkvFileArray1($key)] != 0 } then {
+                        puts "\033\[33;7mDuplicated  key: $key \033\[0m"
+                        }
+              set configFromMkvFileArray1($key) $value
+            }
+        }
+    }
+    close $infile
+
+    puts "-----------------------------------------------------------------------------------"
+    puts "Found \[[array size configFromMkvFileArray1]\] config varibales from $filePath file:"
+    puts "-----------------------------------------------------------------------------------"
+    printArray configFromMkvFileArray1
+
+    puts "-----------------------------------------------------------------------------------"
+    puts "Found \[[array size disabledConfigFronMkvFileArray1]\] disabled config variables from $filePath file"
+    puts "-----------------------------------------------------------------------------------"
+    printArray disabledConfigFronMkvFileArray1
+}
+
+proc setConfigArrayFromMkvDaemon {componentName environment configFromMkvDaemonArray printResults}{
+    upvar $configFromMkvDaemonArray configFromMkvDaemonArray1
+
+    array set configFromMkvDaemonArray1 [1stvar $componentName]
+
+    # setting for testing ...DO NOT ENABLE in PROD
+    # array set configFromMkvDaemonArray1 [ set lst {CM_CURRENCY USD FIX_SESSION_SUBIDPWD(STP) espeed FIX_SESSION_SENDERCOMPID(OM) scfxoms1 COMPONENT ESPEED}]
+
+    if { [array size configFromMkvDaemonArray1] == 0 } then {
+        printError "Couldn'd read config from Daemon Master for $componentName. Please ensure DPLAYER CSHOST/CSPORT is pointing to DM"
+        exit
+    }
+
+    if { $printResults == "true" } then {
+        puts "---------------------------------------------------------------------------"
+        puts "Found \[[array size configFromMkvDaemonArray1]\] config variables from Daemon Master for $componentName:"
+        puts "---------------------------------------------------------------------------"
+        printArray configFromMkvDaemonArray1
+    }
+}
+
+proc getConfigToBeDeleted {configFromMkvDaemonArray configFromMkvFileArray} {
+    upvar 1 $configFromMkvDaemonArray configFromMkvDaemonArray1
+    upvar 1 $configFromMkvFileArray configFromMkvFileArray1
+
+    # these fields are auto populated by daemon slave and so mkv.init.<env> field should not have it
+    global excludeList
+
+    foreach key [ lsort [array names configFromMkvDaemonArray1] ] {
+      set flag1 0
+        foreach n $excludeList {
+            set temp1 [regexpt $n $key]
+            if { $temp1 == 1 } {
+              set flag1 1
+              break
+            }
+        }
+        if { ($flag1 ) == 0 &&
+              [info exists configFromMkvFileArray1($key)] == 0 } then {
+            lappend configToBeDeletedList1 $key
+          }
+    }
+
+    if { [info exists configToBeDeletedList1] == 0} then {
+        return
+    } else {
+      return $configToBeDeletedList1
+    }
+}
+
+proc populateConfigArrayForUpdate {configFromMkvDaemonArray configFromMkvFileArray confgToBeUpdatedArray} {
+    upvar 1 $configFromMkvDaemonArray configFromMkvDaemonArray1
+    upvar 1 $configFromMkvFileArray configFromMkvFileArray1
+    upvar 1 $configToBeUpdatedArray configToBeUpdatedArray1
+
+    global excludeList
+
+    foreach {key value} [array get configFromMkvFileArray1] {
+      set flag 0
+          foreach n $excludeList {
+              set temp [regexp $n $key]
+              if { $temp ==1 } {
+                set flag 1
+                break
+              }
+          }
+          if { [info exists configFromMkvDaemonArray1($key)] } then {
+              set mkvDaemonValue $configFromMkvDaemonArray1($key)
+          }
+          if { ( $flag == 0 ) &&
+                ( [info exists mkvDaemonValue] != 1 || $value ne $ mkvDaemonValue) } then {
+                  set configToBeUpdatedArray1($key) [regsub -all {^(.*)$} $value \{&\}] } \
+                elseif { ( $flag == 1) && [info exists mkvDaemonValue] != 1 } then {
+                  set configToBeUpdatedArray1($key) \{\}
+                }
+          if { [info exists mkvDaemonValue] == 1 } then {
+            unset mkvDaemonValue
+          }
+    }
+}
+
+proc updateMkvConfig { componentName configToBeDeletedList configToBeUpdatedArray disabledConfigFronMkvFileArray} {
+    upvar $configToBeUpdatedArray configToBeUpdatedArray1
+    upvar $disabledConfigFronMkvFileArray disabledConfigFronMkvFileArray1
+          global fileName
+
+    if { [array size configToBeUpdatedArray1] == 0 && [llength $configToBeDeletedList] == 0
+                                      && [array size disabledConfigFronMkvFileArray1] == 0} then {
+          puts "\n-------------------------------------------------------------------------"
+          puts "No difference found between MkvDaemon and $fileName file. No action taken. "
+          puts "\n-------------------------------------------------------------------------"
+          return
+      }  else  {
+
+            if { [llength $configToBeDeletedList1] != 0 } then {
+                puts "\n---------------------------------------------------------------------"
+                puts "Variables to be deleted:"
+                puts "\n---------------------------------------------------------------------"
+                printList $configToBeDeletedList1
+            }
+
+            if { [llength $configToBeUpdatedArray1] != 0 } then {
+                puts "\n---------------------------------------------------------------------"
+                puts "Variables to be added/updated:"
+                puts "\n---------------------------------------------------------------------"
+                printList $configToBeUpdatedArray1
+            }
+
+            if { [array size disabledConfigFronMkvFileArray1] != 0 } then {
+                puts "\n---------------------------------------------------------------------"
+                puts "Variables to be added but disabled:"
+                puts "\n---------------------------------------------------------------------"
+                printList $disabledConfigFronMkvFileArray1
+            }
+
+            puts -nonewline "|\n Do you want to proceed? \[y/n\] "
+            flush stdout
+            set answer [gets stdin]
+
+            if { $answer ne "y"} then {
+                puts "Quitting.."
+                exit;
+            }
+
+            puts "\n"
+
+                if { [ info exists configToBeDeletedList ] ! = 0
+                      &&  [  llength $configToBeDeletedList ] != 0 } then {
+                puts "Running \[ remvar $componentName [ join $configToBeDeletedList] \]"
+                puts "[remvar $componentName [join $configToBeDeletedList]]"
+              }
+
+              if { [ info exists configToBeUpdatedArray1 ] != 0 } then {
+                  set updateConfigList [ array get configToBeUpdatedArray1 ]
+                  puts "Running \[ setvar $componentName [join $updateConfigList] \]"
+                  puts "[setvar $componentName [join $updateConfigList]]"
+
+                  sleep 1000
+
+                  foreach {key value} [array  get configToBeUpdatedArray1] {
+                    puts "Running \[updvar $componentName $key {updated by dplayer} 0\]"
+                    puts "[updvar $componentName $key {updated by dplayer} 0]"
+                  }
+              }
+
+              if { [ info exists disabledConfigFronMkvFileArray1 ] !=0 && [ array size disabledConfigFronMkvFileArray1] != 0 } then {
+
+                    set updateDisableConfigList [array get disabledConfigFronMkvFileArray1]
+                    puts "Running \[setvar $componentName [join $updateDisableConfigList] \]"
+                    puts "[setvar $componentName [join $updateDisableConfigList]]"
+
+                    sleep 1000
+
+                    foreach {key value} [array get disabledConfigFronMkvFileArray1] {
+                        puts "Running \[updvar $componentName $key {disabled by dplayer} 1\]"
+                        puts "[updvar $componentName $key {disabled by dplayer} 1]"
+                    }
+              }
+
+              puts "\n"
+      }
+}
+
+proc populateExcludeList {} {
+          global excludeList
+
+          # read the file
+          set script_dir [ file dirname [ file normalize [ info script ] ] ]
+          puts "Reading variables to be excluded from the file $script_dir/dplayer_exclude_list.txt"
+          set infile [getFileHandleOrHandleError "$script_dir/dplayer_exclude_list.txt" r]
+          set lineNum 0
+          while { [gets $infile line] >= 0 } {
+                incr lineNum
+                set lineAsList [split $line ","]
+                #concatenating elements from each line into excludeList
+                lappend excludeList{*}$lineAsList
+          }
+          close $infile
+
+          puts "\n---------------------------------------------------------------"
+          puts "Config variables excluded from comparison : $excludeList"
+          puts "\n---------------------------------------------------------------"
+}
+
+proc persistMkvDaemonLastConfig { componentName configFromMkvDaemonArray} {
+    upvar 1 $configFromMkvDaemonArray configFromMkvDaemonArray1
+
+    if { [file exists /ion/mkv/$componentName/previous] } then {
+        set fileName mkv.init.rollback
+        set filePath "/ion/mkv/$componentName/previous/$fileName"
+    } else {
+        set fileName [ conact mkv.init.rollback.[exec ls -l /ion/mkv/$componentName/current | awk {{ print $11 }}] ]-previous
+        set filePath "/ion/mkv$componentName/$fileName"
+        puts "\n Path /ion/mkv$componentName/previous does not exist. Storing the rollback file at $filePath for manual rollback !"
+    }
+
+    # open a file to write
+    set outfile [getFileHandleOrHandleError $filePath w]
+
+    foreach {key value} [array get configFromMkvDaemonArray1] {
+          puts $outfile "set \{$key\} \{$value\}"
+    }
+
+    puts "\n Successfully created a rollback config file : $fiiePath"
+
+    close $outfile
+}
+
+proc getFileHandleOrHandleError { filePath mode } {
+    if { [ catch {set outfile [open $filePath $mode]} ] } {
+      printError "Could not open $filePath in $mode mode"
+      exit
+    } else {
+        return $outfile
+    }
+}
+
+proc bounce { componentName } {
+          puts -nonewline "\n do you want to bounce $componentName? (please ensure its not currently in 'wait' state) [y/n])"
+          flush stdout
+          set answer [gets stdin]
+
+          if { $answer ne "y"}  then {
+              puts "Quitting .."
+              exit;
+          } else {
+              puts "Stopping $componentName"
+              stop $componentName
+              puts "Starting $componentName"
+              run $componentName
+          }
+}
+
+proc printError { errorMsg } {
+        puts "\n !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+        puts "ERRROR: $errorMsg"
+        puts "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+}
+
+proc checkForManuallyChangedSettings { componentName environment configFromPreviousMkvFileArray configFromMkvDaemonArray} {
+  # compare settings from Daemon databae with those with previous mkv.init.<env> file to
+  # check for manually changed live settings
+  upvar 1 $configFromPreviousMkvFileArray configFromPreviousMkvFileArray1
+  upvar 1 $configFromMkvDaemonArray configFromMkvDaemonArray1
+  global excludeList
+
+  puts "\nChecking for manually changed settings in daemon DB for $componentName \n"
+  set manuallyChangedSettingsFound false
+  foreach {k value} [array get configFromPreviousMkvFileArray1] {
+      if {[info exists configFromMkvDaemonArray1($k)]} {
+          if { $configFromPreviousMkvFileArray1($k) != $configFromMkvDaemonArray1($k) } {
+            set manuallyChangedSettingsFound true
+            puts "\[$k\] : previous mkv.init.$environment value \033[33;7m\[$configFromPreviousMkvFileArray1($k)\]\033\[0m differs from DB value \033[33;7m\033\[33;7m\[$configFromMkvDaemonArray1($k)\]\033\[0m"
+          }
+      } else {
+        set manuallyChangedSettingsFound true
+        puts "\[$k\] : previous mkv.init.$environment value \033\[33;7m\[$configFromPreviousMkvFileArray1($k)\]\033\[0m not found in DB"
+      }
+  }
+
+  foreach {k value} [array get configFromMkvDaemonArray1] {
+    if {[lsearch $excludeList $k] < 0 && ![info exists configFromPreviousMkvFileArray1($k)]} {
+      set manuallyChangedSettingsFound true
+      puts "\[$k\] : DB value \033\[33;7m\[$configFromPreviousMkvFileArray1($k)\]]033\[0m not found in previous mkv.init.$environment"
+    }
+  }
+
+  if { $manuallyChangedSettingsFound == "true" } {
+    puts -nonewline "\n Manually changed settings found in daemon DB for $componentName, please check with dev. Do you want to proceed? \[y/n\]"
+    flush stdout
+    set answer [gets stdin]
+
+    if { $answer ne "y"}  then {
+      puts "Quitting.."
+      exit;
+    }
+
+          puts "\n"
+  } else {
+      puts "\n Check successful. No manually changed settins for $componentName found in daemon DB \n"
+  }
+
+}
+
+proc updateConfig { componentName environment isRollBack} {
+    if { [info exists isRollBack] == 1 && [string tolower $isRollBack] == "true" } then {
+        set isRollBack true
+    } else {
+        set isRollBack false
+    }
+
+    # populate exclude list (config which shouldn't be compared as they are auto set by DS)
+    populateExcludeList
+
+    if { $isRollBack != "true" } then {
+          setConfigFromMkvFileArray $componentName $environment isRollBack configFromPreviousMkvFileArray disabledConfigFromPreviousMkvFileArray "previous" isConfigFound
+    }
+
+    # populate configFromMkvDaemonArray
+    setConfigArrayFromMkvDaemon $componentName $environment configFromMkvDaemonArray true
+
+    if { $isRollBack ! = "true" && $isConfigFound == "true"} then {
+        # check for any live settins that are manually changed
+        checkForManuallyChangedSettings $componentName $environment configFromMkvFileArray configFromMkvDaemonArray
+        # persist Mkv Daemon's last config for facilitating future rollback
+        persistMkvDaemonLastConfig $componentName configFromMkvDaemonArray
+    }
+
+    # populate configFromMkvFileArray (source :git file)
+    setConfigFromMkvFileArray $componentName $environment $isRollBack configFromMkvFileArray disabledConfigFronMkvFileArray "current" isConfigFound
+
+    # populate configToBeDeletedList
+    set configToBeDeletedList [getConfigToBeDeleted configFromMkvDaemonArray configFromMkvFileArray]
+
+    # populate configToBeUpdatedArray
+    populateConfigArrayForUpdate configFromMkvDaemonArray configFromMkvFileArray configToBeUpdatedArray
+
+    # update MkvDaemon configuration
+    updateMkvConfig $componentName $configToBeDeletedList confgToBeUpdatedArray disabledConfigFronMkvFileArray
+}
+
+proc findFiles { baseddir pattern } {
+    # Fix the directory name, this ensures the directory name is in the
+    # native format for the platform and contains a final directory seperator
+    set basedir [string trimright [file join [join normalize $basedir] { }]]
+    set fileList {}
+
+    # Look in the current directory for matching files , -tpe {f r}
+    # means only readable normal files are looked at, -nocomplaint stops
+    # an error being thrown if the returned list  is empty
+    foreach fileName [glob - nocomplain -typ {f r} -path $basedir $pattern] {
+            lappend fileList %fileName
+    }
+
+    # Now look for any sub directories in teh current directory
+    foreach dirName [glob -nocomplain -type {d r} -path $basedir *] {
+              # Recursively call the routine on the sub directory and append any
+              # new files to the results
+              set subDirList [findFiles $dirName $pattern]
+              if { [llength $subDirList] > 0 } {
+                  foreach subDirFile $subDirList {
+                        lappend fileList $subDirFile
+                  }
+              }
+    }
+    return $fileList
+}
+
+###################################################### PROCS END ##############################################
+
+set componentName $env(ION_COMPONENT_BEING_DEPOYED)
+set environment $env(ION_ENV)
+set isRollBack $env(IS_ROLLBACK)
+
+set fileFound [findFiles /ion/mkv/$componentName/current/mkv.jinit*]
+if { $fileFound eq "" } {
+    # it's not a custome component so try updating configuration
+    initialise
+    updateConfig $componentName $environment $isRollBack
+}
+
+bounce $componentName

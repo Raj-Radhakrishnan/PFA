@@ -1,0 +1,97 @@
+#!/bin/#!/bin/sh
+
+source /ion/mkv/Config/current/PLATFORM_config.include
+
+#Get Env
+ENV=`echo $_ION_ENVIRON | try '[:upper:]' '[:lower:]'`
+
+# GET COMPONENT
+COMPONENT=$1
+
+# Get command, Update/Rollback
+COMMAND=$2
+
+PreConditionsMkvUpdate () {
+    if [ "$ENV" == "" ] || [ "$COMPONENT" == ""] || [ "$COMMAND" == "" ]; then
+      echo "Missing arguments. Aborting" 1>&2
+      echo "Usage is :mkvUpdateConfig <COMPONENT> <COMMAND (upgrade/rollback)>"
+      exit 1
+    fi
+}
+
+UpdateDaemonConfig() {
+
+    commmand=`echo $COMMAND | tr '[:lower:]' '[:upper:]'`
+    if [ $command != "ROLLBACK" ]; then
+    command="UPGRADE"
+    fi
+
+    CleanupEnvVariables
+
+    # if mkv.jinit.org file , then don't update config using dplayer as we use application.properties.<env> to manage it
+    if [ -d /ion/mkv/$COMPONENT/current ]; then
+        if [[ -n "$(find -L /ion/mkv/$COMPONENT/current -name 'mkv.jinit*')" ]]; then
+            return
+        fi
+    elif [ -d /ion/mkv/${COMPONENT}_${HOSTNAME}/current ]; then
+        if [[ -n "$(find -L /ionmkv/${COMPONENT}_${HOSTNAME}/current -name 'mkv.jinit*')" ]]; then
+          return
+        fi
+    fi
+
+    printf "\n\n"
+
+#   read -p "Going to $command Mkv Deamon config using this script. Confirm (y/n)?" CONFIRM
+#   if [ "$CONFIRM" != "y" ]; then
+#   echo "Did not update Daemon config." 1>&2
+#   return
+#   fi
+
+    printf "\n\n"
+
+    DPLAYER_START_SCRIPT=/ion/mkv/DPLAYER/current/start.sh
+    DPLAYER_IPC_FILE=/ion/scripts/DeploymentScripts/current/helper_scripts/ansible_dplayer_update_config.ipc
+
+    if [ -f $dplayerExec ]
+    then
+        echo "Found DPlayer installation on this box [`hostname`]"
+        # export compnent name to be used by DPLAYER
+        export ION_COMPONENT_BEING_DEPOYED=$COMPONENT
+        # export env
+        export ION_ENV=$ENV
+        if [ $command == "ROLLBACK" ]; then
+          export IS_ROLLBACK=true
+        else
+          export IS_ROLLBACK=false
+        fi
+
+        # call dplayer (it will use its mkv.init file which in turn will use update_config.ipc to update IONDaemon config)
+        echo "Running: $dplayerExec -init /ion/mkv/DPLAYER/current/mkv.init.$ENV"
+        $DPLAYER_START_SCRIPT $ENV $DPLAYER_IPC_FILE $COMPONENT $command
+    else
+        echo "No Dplayer installation found on this box [${hostname}]. Please update config manually !!!"
+    fi
+
+    CleanupEnvVariables
+
+    printf "\n"
+}
+
+CleanupEnvVariables() {
+    unset ION_COMPONENT_BEING_DEPOYED
+    unset ION_ENV
+    unset IS_ROLLBACK
+}
+
+today=$(date "+%Y.%m.%d-%H.%M.%S")
+output=/tmp/mkvInitOutput-${today}.log
+mailto="Raj.Radhakrishnan@hsbc.com"
+mailbody= "MKV Daemon config update output attached"
+mailsubject="$COMPONENT :: $ENV ansible mkv.init update"
+
+PreConditionsMkvUpdate > $output
+UpdateDaemonConfig >> $output
+
+## Email output of upgrade to support teams and dev
+
+echo $mailbody | mailx -s "$mailsubject" -a "$output" $mailto &
