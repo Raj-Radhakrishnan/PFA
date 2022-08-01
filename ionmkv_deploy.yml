@@ -1,0 +1,169 @@
+
+
+
+
+
+
+- hosts: uk,us
+  gather_facts: no
+  vars:
+    app_root: /ion/mkv
+    package_name_and_version: "{{ artifacts | basename | regex_replace('(^.+)\\.tar\\.gz', '\\1') }}"
+    package_name: "{{ package_name_and_version.split('-') [0] }}"
+    target_dir: "{{ app_root }}/{{ package_name }}"
+    pkg_dir: "{{ target_dir }}/{{ package_name_and_version }}"
+    project_name: "ECOMM-ION"
+  tasks:
+    # Block of Common tasks
+    - name: "Running common tasks"
+      tags: Common
+      block:
+        - name: "Ensure target directory exists at {{ target_dir }}"
+          file:
+            path: '{{ target_dir ))'
+            state: directory
+            mode: 0755
+
+        - name: "Check if a package exists in the remote server"
+          stat:
+           path: '{{ target_dir }}/current'
+          register: stat_result
+
+        - name: "Check if a previous symlink exists"
+          stat:
+           path: '{{ target_dir }}/previous'
+          register: previous_link
+
+        # Define the list of ION Marketview Java components that use JVM args. Running dplayer script removes all the JVM args
+        - name: "Set fact to define ION Marketview Java components, anything with JVM args"
+          set_fact:
+              ionmkv_java: [ 'ADS', 'PXE', 'TRADITION_UK_MD', 'SNAPSHOT_MANAGER', 'RUN_LIST_MANAGER', 'ROUTER' ]
+
+    # Black of Deploy tasks
+    - name: "Running Deploy tasks"
+      tags: Deploy
+      block:
+        - name: "Before deploy, delete previous symlink"
+          file:
+            path: '{{ target_dir }}/previous'
+            state: absent
+          when: previous_link.stat.islink is defined and previous_link.stat.islink
+
+        - name: "Download and unarchived package {{ artifactory_base_url }}/{{ artifacts }} to {{ target_dir }}"
+          unarchive:
+           remote_src: yes
+           src: "{{ artifactory_base_url }}/{{ artifacts }}"
+           dest: '{{ target_dir }}'
+           creates: "{{pkg_dir }}"
+           mode: 0755
+
+        #Fetches the copyFiles from the remote ION dplayer host from the deployed package
+        - name: "Slurp the copyFiles of the remote package and register it to a variable"
+          slurp:
+            src: "{{ target_dir }}/{{package_name_and_version }}/copyFiles"
+          register: copyFiles
+
+        - name: "Save the contents of the copyFiles for iterating"
+          set_fact:
+            copyFiles_contents: "{{copyFiles['content'] | b64decode }}"
+
+        # Copy the contents of copyFiles under /tmp/<package_name_copyFiles
+        - local_action: copy content={{ copyFiles_contents }} dest="/tmp/{{ package_name }}_copyFiles"
+
+        - name: "Execute copyFIles from previous release only when the previous release exists"
+          copy:
+            remote_src: yes
+            src: "{{ target_dir }}/current/{{ item }}"
+            dest: '{{ target_dir }}/{{ package_name_and_version }}'
+            mode: 0640
+          with_lines: cat "/tmp/{{ package_name }}_copyFiles"
+          when: stat_results.stat.exists
+          ignore_errors: yes
+
+        # Fetches the link from the remore ION dplayer host from the deployed package
+        - name: "Slurp the links file of the remote package and register it to a variable"
+          slurp:
+             src: "{{ target_dir }}/{{ package_name_and_version }}/links"
+          register: links
+
+        - debug:
+           msg: "{{ links['content'] | b64decode }}"
+
+        - name: "Save contents of the links fike to a variable for iterating"
+          set_fact:
+            links_contents: "{{links['content'] | b64decode }}"
+
+        # Copy the contents of links under /tmp/<package_name_links
+        - local_action: copy content={{ links_contents }} dest="/tmp/{{ package_name }}_links"
+
+        - name: "Create links as defined in the link file"
+          file:
+            src: "{{ item.split('=')[1] }}"
+            dest: "{{ target_dir }}/{{ package_name_and_version }}/{{ item.split('=')[0] }}"
+            state: link
+            force: yes
+          with_lines: cat"/tmp/{{ package_name }}_links"
+
+        - name: "Move the previous package to previous symlink for rollback purposes"
+          command: mv {{ target_dir }}/current ' '{{ target_dir }}/previous'
+          when: stat_result.stat.exists
+
+        - name: "Create current symlink in the remote server"
+          file:
+            src: '{{ package_name_and_version }}'
+            dest: '{{ target_dir }}/current'
+            state: link
+            force: yes
+
+        # Execute the Deamon config in the designated dplaye host when the package is not ION Java component
+        - name: "Execute the Daemon update config for the {{ package_name }} on the designated Dplayer server"
+          delegate_to: '{{ groups["dplayer"] [0] }}'
+          shell: /ion/script/DeploymentScripts/current/AnsiblemkvUpdateConfig.sh"{{ package_name ))" upgrade
+          register: mkv_deploy_config_results
+          when:
+            - inventory_hostname in groups['dplayer']
+            - package_name not in ionmkv_java
+
+        # Delete mkv.init files that do not belong to the current environment
+        - name: "Find list of non environment mkv.init files"
+          find:
+            paths: '{{ target_dir }}/current'
+            patterns: "mkv.init.((?!{{ ion_env }}|orig|rollback.)*$"
+            use_regex: yes
+          register: files_to_delete
+
+        - debug:
+            msg: "{{ files_to_delete.files }}"
+
+        - name: "Delete non env mkv.init files"
+          file:
+            paths: "{{ item.path }}"
+            state: absent
+          with_items: "{{ files_to_delete.files }}"
+
+    # Block of Rollback tasks
+    - name: "Runn component rollbavck tasks"
+      tags: Rollback
+      block:
+        - name: "Rollback : Delete the current symlink "
+          # command: echo "Command as rm {{ target_dir }}/current"
+          command: rm ' {{ target_dir }}/current'
+          register: delete_current_symlink
+
+        - debug: var=delete_current_symlink.stdput_lines
+
+        - name: "Rollback : Move the previous package to current symlinkfor rollback purposes"
+          #command: echo "Command is my {{ target_dir }}/previous {{ target_dir }}/current"
+          command: mv '{{ target_dir }}/previous' '{{ target_dir }}/current'
+          register: move_prev_to_curr
+          when: stat_results.stat.exists
+
+        - debug: var=move_prev_to_curr.stdout_lines
+
+        - name: "Execute the Daemon Rollback config for the {{ package_name }} on the designated Dplayer server"
+          delegate_to: '{{ groups["dplayer"][0] }}'
+          shell: /ion/scripts/DeveloymentScripts/current/AnsiblemkvUpdateConfig.sh "{{ package_name }}" rollback
+          register: mkv_rollback_config_restults
+          when:
+             - inventory_hostname in groups['dplayer']
+             - package_name not in ionmkv_java
